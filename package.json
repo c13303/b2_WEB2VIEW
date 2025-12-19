@@ -1,0 +1,44 @@
+{
+  "name": "blektre-web2view",
+  "version": "0.1.0",
+  "description": "Windows webview wrapper for https://blektre.com",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win --x64"
+  },
+  "dependencies": {
+    "steamworks.js": "latest"
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.blektre.web2view",
+    "productName": "Blektre",
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json",
+      "steam_appid.txt",
+      "wrapper.html",
+      "version.txt"
+    ],
+    "extraFiles": [
+      "steam_appid.txt",
+      "version.txt"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    }
+  }
+}

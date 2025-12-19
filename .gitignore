@@ -1,0 +1,4 @@
+EXAMPLE/
+dist/
+node_modules/
+*.log
