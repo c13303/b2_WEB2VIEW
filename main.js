@@ -9,12 +9,7 @@ const {
   shell,
 } = require("electron");
 
-process.on("warning", (warning) => {
-  console.warn("[web2view] Warning:", warning.stack || warning);
-});
-
-const isDemo = true;
-const resetAchievements = false;
+const isDemo = false;
 const BASE_DOMAIN = isDemo ? "bdev.blektre.com" : "blektre.com";
 const GAME_ORIGIN = `https://${BASE_DOMAIN}`;
 const WRAPPER_FILE = path.join(__dirname, "wrapper.html");
@@ -26,21 +21,7 @@ let pageReady = false;
 const pendingMessages = [];
 let steamClient = null;
 let steamAvailable = false;
-let steamCallbacksTimer = null;
-let steamStatsRequested = false;
-let loadingListenerAttached = false;
-let steamInitAttempted = false;
 const storeFilePath = () => path.join(app.getPath("userData"), "store.json");
-
-function canInitSteamworks() {
-  const envAppId =
-    process.env.SteamAppId ||
-    process.env.STEAM_APPID ||
-    process.env.SteamGameId ||
-    process.env.STEAM_GAME_ID;
-  const localAppId = path.join(__dirname, "steam_appid.txt");
-  return Boolean(envAppId || fs.existsSync(localAppId));
-}
 
 function readVersionString() {
   try {
@@ -134,20 +115,10 @@ function createWindow() {
 
 function sendToGame(data) {
   if (!mainWindow || mainWindow.isDestroyed()) {
-    return; 
+    return;
   }
-  const webContents = mainWindow.webContents;
-  if (!pageReady || webContents.isLoading()) {
+  if (!pageReady) {
     pendingMessages.push(data);
-    if (webContents.isLoading() && !loadingListenerAttached) {
-      loadingListenerAttached = true;
-      webContents.once("did-stop-loading", () => {
-        loadingListenerAttached = false;
-        if (pageReady) {
-          flushPendingMessages();
-        }
-      });
-    }
     return;
   }
 
@@ -200,11 +171,11 @@ function injectEscapeBlocker(webContents, frame = null) {
 
   try {
     if (frame) {
-      frame.executeJavaScript(script, true).catch(() => { });
+      frame.executeJavaScript(script, true).catch(() => {});
     } else {
-      webContents.executeJavaScript(script, true).catch(() => { });
+      webContents.executeJavaScript(script, true).catch(() => {});
       for (const child of webContents.mainFrame.frames) {
-        child.executeJavaScript(script, true).catch(() => { });
+        child.executeJavaScript(script, true).catch(() => {});
       }
     }
   } catch (_) {
@@ -240,56 +211,12 @@ function saveStore(store) {
 }
 
 function initSteam() {
-  if (steamInitAttempted) return;
-  steamInitAttempted = true;
-  if (!canInitSteamworks()) {
-    steamAvailable = false;
-    return;
-  }
   try {
     // Lazy require so the app can still run without Steam installed.
     // eslint-disable-next-line global-require, import/no-extraneous-dependencies
     const steamworks = require("steamworks.js");
     steamClient = steamworks.init(STEAM_APP_ID);
     steamAvailable = !!steamClient;
-    if (steamAvailable) {
-      try {
-        if (steamClient.userStats?.requestCurrentStats) {
-          steamClient.userStats.requestCurrentStats();
-          steamStatsRequested = true;
-        } else if (steamClient.stats?.requestCurrentStats) {
-          steamClient.stats.requestCurrentStats();
-          steamStatsRequested = true;
-        }
-        if (resetAchievements) {
-          if (steamClient.userStats?.resetAllStats) {
-            steamClient.userStats.resetAllStats(true);
-            steamClient.userStats.storeStats?.();
-          } else if (steamClient.stats?.resetAll) {
-            steamClient.stats.resetAll(true);
-            steamClient.stats.store?.();
-          }
-        }
-
-      } catch (err) {
-        console.warn(
-          "[web2view] Steam stats request failed:",
-          err?.message || err
-        );
-      }
-      if (steamClient.runCallbacks) {
-        steamCallbacksTimer = setInterval(() => {
-          try {
-            steamClient.runCallbacks();
-          } catch (err) {
-            console.warn(
-              "[web2view] Steam callbacks error:",
-              err?.message || err
-            );
-          }
-        }, 1000);
-      }
-    }
   } catch (err) {
     steamAvailable = false;
     steamClient = null;
@@ -367,21 +294,9 @@ async function sendSteamState() {
 function handleAchievement(name) {
   if (!steamAvailable || !steamClient || !name) return;
   try {
-    if (!steamStatsRequested) {
-      if (steamClient.userStats?.requestCurrentStats) {
-        steamClient.userStats.requestCurrentStats();
-        steamStatsRequested = true;
-      } else if (steamClient.stats?.requestCurrentStats) {
-        steamClient.stats.requestCurrentStats();
-        steamStatsRequested = true;
-      }
-    }
     if (steamClient.userStats?.setAchievement) {
       steamClient.userStats.setAchievement(name);
       steamClient.userStats.storeStats?.();
-    } else if (steamClient.achievement?.activate) {
-      steamClient.achievement.activate(name);
-      steamClient.stats?.store?.();
     } else if (steamClient.achievements?.unlock) {
       steamClient.achievements.unlock(name);
     }
@@ -499,10 +414,6 @@ app.on("will-quit", () => {
 
 app.on("before-quit", () => {
   try {
-    if (steamCallbacksTimer) {
-      clearInterval(steamCallbacksTimer);
-      steamCallbacksTimer = null;
-    }
     steamClient?.shutdown?.();
   } catch (_) {
     // Ignore shutdown errors.
