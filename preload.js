@@ -1,6 +1,10 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
-const ALLOWED_ORIGINS = new Set(["https://blektre.com", "null"]);
+const ALLOWED_ORIGINS = new Set([
+  "https://blektre.com",
+  "https://bdev.blektre.com",
+  "null",
+]);
 
 contextBridge.exposeInMainWorld("web2view", {
   send(payload) {

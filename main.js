@@ -9,7 +9,14 @@ const {
   shell,
 } = require("electron");
 
-const GAME_ORIGIN = "https://blektre.com";
+process.on("warning", (warning) => {
+  console.warn("[web2view] Warning:", warning.stack || warning);
+});
+
+const isDemo = true;
+const resetAchievements = false;
+const BASE_DOMAIN = isDemo ? "bdev.blektre.com" : "blektre.com";
+const GAME_ORIGIN = `https://${BASE_DOMAIN}`;
 const WRAPPER_FILE = path.join(__dirname, "wrapper.html");
 const VERSION_FILE = path.join(__dirname, "version.txt");
 const STEAM_APP_ID = 3045400;
@@ -19,14 +26,28 @@ let pageReady = false;
 const pendingMessages = [];
 let steamClient = null;
 let steamAvailable = false;
+let steamCallbacksTimer = null;
+let steamStatsRequested = false;
+let loadingListenerAttached = false;
+let steamInitAttempted = false;
 const storeFilePath = () => path.join(app.getPath("userData"), "store.json");
+
+function canInitSteamworks() {
+  const envAppId =
+    process.env.SteamAppId ||
+    process.env.STEAM_APPID ||
+    process.env.SteamGameId ||
+    process.env.STEAM_GAME_ID;
+  const localAppId = path.join(__dirname, "steam_appid.txt");
+  return Boolean(envAppId || fs.existsSync(localAppId));
+}
 
 function readVersionString() {
   try {
     const raw = fs.readFileSync(VERSION_FILE, "utf8").trim();
-    return raw || "VERSION2002_HOTFIX333";
+    return raw || "V_CHRISTMAS2025_V2";
   } catch (_) {
-    return "VERSION2002_HOTFIX333";
+    return "V_CHRISTMAS2025_V2";
   }
 }
 
@@ -54,7 +75,7 @@ function createWindow() {
   mainWindow = win;
   win.setMenuBarVisibility(false);
   const version = readVersionString();
-  win.loadFile(WRAPPER_FILE, { query: { version } });
+  win.loadFile(WRAPPER_FILE, { query: { version, domain: BASE_DOMAIN } });
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith(GAME_ORIGIN) || url.startsWith("file://")) {
@@ -84,21 +105,49 @@ function createWindow() {
       event.preventDefault();
       win.webContents.toggleDevTools();
     }
+    if (input.key === "Escape" && win.isFullScreen()) {
+      event.preventDefault();
+    }
   });
 
   win.webContents.on("did-finish-load", async () => {
     pageReady = true;
     flushPendingMessages();
     await sendSteamState();
+    injectEscapeBlocker(win.webContents);
+  });
+
+  win.webContents.on("did-frame-finish-load", (_event, isMainFrame, frameId) => {
+    if (isMainFrame) return;
+    try {
+      const frame = win.webContents.mainFrame.frames.find(
+        (f) => f.frameId === frameId
+      );
+      if (frame) {
+        injectEscapeBlocker(win.webContents, frame);
+      }
+    } catch (_) {
+      // Ignore frame injection errors.
+    }
   });
 }
 
 function sendToGame(data) {
   if (!mainWindow || mainWindow.isDestroyed()) {
-    return;
+    return; 
   }
-  if (!pageReady) {
+  const webContents = mainWindow.webContents;
+  if (!pageReady || webContents.isLoading()) {
     pendingMessages.push(data);
+    if (webContents.isLoading() && !loadingListenerAttached) {
+      loadingListenerAttached = true;
+      webContents.once("did-stop-loading", () => {
+        loadingListenerAttached = false;
+        if (pageReady) {
+          flushPendingMessages();
+        }
+      });
+    }
     return;
   }
 
@@ -118,6 +167,49 @@ function sendToGame(data) {
   mainWindow.webContents.executeJavaScript(script, true).catch((err) => {
     console.warn("[web2view] Failed to postMessage:", err);
   });
+}
+
+function injectEscapeBlocker(webContents, frame = null) {
+  const script = `
+    (function() {
+      if (window.__blektreEscBlockerInstalled) return;
+      window.__blektreEscBlockerInstalled = true;
+      window.addEventListener(
+        "keydown",
+        function(event) {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation();
+          }
+        },
+        true
+      );
+      document.addEventListener(
+        "fullscreenchange",
+        function() {
+          if (!document.fullscreenElement && document.body) {
+            // Keep focus to avoid implicit fullscreen exit on Esc.
+            document.body.focus();
+          }
+        },
+        true
+      );
+    })();
+  `;
+
+  try {
+    if (frame) {
+      frame.executeJavaScript(script, true).catch(() => { });
+    } else {
+      webContents.executeJavaScript(script, true).catch(() => { });
+      for (const child of webContents.mainFrame.frames) {
+        child.executeJavaScript(script, true).catch(() => { });
+      }
+    }
+  } catch (_) {
+    // Ignore injection errors.
+  }
 }
 
 function flushPendingMessages() {
@@ -148,12 +240,56 @@ function saveStore(store) {
 }
 
 function initSteam() {
+  if (steamInitAttempted) return;
+  steamInitAttempted = true;
+  if (!canInitSteamworks()) {
+    steamAvailable = false;
+    return;
+  }
   try {
     // Lazy require so the app can still run without Steam installed.
     // eslint-disable-next-line global-require, import/no-extraneous-dependencies
     const steamworks = require("steamworks.js");
     steamClient = steamworks.init(STEAM_APP_ID);
     steamAvailable = !!steamClient;
+    if (steamAvailable) {
+      try {
+        if (steamClient.userStats?.requestCurrentStats) {
+          steamClient.userStats.requestCurrentStats();
+          steamStatsRequested = true;
+        } else if (steamClient.stats?.requestCurrentStats) {
+          steamClient.stats.requestCurrentStats();
+          steamStatsRequested = true;
+        }
+        if (resetAchievements) {
+          if (steamClient.userStats?.resetAllStats) {
+            steamClient.userStats.resetAllStats(true);
+            steamClient.userStats.storeStats?.();
+          } else if (steamClient.stats?.resetAll) {
+            steamClient.stats.resetAll(true);
+            steamClient.stats.store?.();
+          }
+        }
+
+      } catch (err) {
+        console.warn(
+          "[web2view] Steam stats request failed:",
+          err?.message || err
+        );
+      }
+      if (steamClient.runCallbacks) {
+        steamCallbacksTimer = setInterval(() => {
+          try {
+            steamClient.runCallbacks();
+          } catch (err) {
+            console.warn(
+              "[web2view] Steam callbacks error:",
+              err?.message || err
+            );
+          }
+        }, 1000);
+      }
+    }
   } catch (err) {
     steamAvailable = false;
     steamClient = null;
@@ -231,9 +367,21 @@ async function sendSteamState() {
 function handleAchievement(name) {
   if (!steamAvailable || !steamClient || !name) return;
   try {
+    if (!steamStatsRequested) {
+      if (steamClient.userStats?.requestCurrentStats) {
+        steamClient.userStats.requestCurrentStats();
+        steamStatsRequested = true;
+      } else if (steamClient.stats?.requestCurrentStats) {
+        steamClient.stats.requestCurrentStats();
+        steamStatsRequested = true;
+      }
+    }
     if (steamClient.userStats?.setAchievement) {
       steamClient.userStats.setAchievement(name);
       steamClient.userStats.storeStats?.();
+    } else if (steamClient.achievement?.activate) {
+      steamClient.achievement.activate(name);
+      steamClient.stats?.store?.();
     } else if (steamClient.achievements?.unlock) {
       steamClient.achievements.unlock(name);
     }
@@ -351,6 +499,10 @@ app.on("will-quit", () => {
 
 app.on("before-quit", () => {
   try {
+    if (steamCallbacksTimer) {
+      clearInterval(steamCallbacksTimer);
+      steamCallbacksTimer = null;
+    }
     steamClient?.shutdown?.();
   } catch (_) {
     // Ignore shutdown errors.

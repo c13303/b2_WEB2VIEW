@@ -17,7 +17,8 @@
   },
   "build": {
     "appId": "com.blektre.web2view",
-    "productName": "Blektre",
+    "productName": "Blêktre 2081 - The Real Life Simulator",
+    "artifactName": "Blêktre 2081 - The Real Life Simulator.${ext}",
     "files": [
       "main.js",
       "preload.js",
