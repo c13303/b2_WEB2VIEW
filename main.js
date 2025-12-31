@@ -9,8 +9,13 @@ const {
   shell,
 } = require("electron");
 
-const isDemo = false;
-const BASE_DOMAIN = isDemo ? "bdev.blektre.com" : "blektre.com";
+const isDev = false;
+const resetAchievements = false;
+const triggerTestAchievementOnLaunch = true;
+const testAchievementName = "RUNTHEGAME";
+const DEV_DOMAIN = "bdev.blektre.com";
+const PROD_DOMAIN = "blektre.com";
+const BASE_DOMAIN = isDev ? DEV_DOMAIN : PROD_DOMAIN;
 const GAME_ORIGIN = `https://${BASE_DOMAIN}`;
 const WRAPPER_FILE = path.join(__dirname, "wrapper.html");
 const VERSION_FILE = path.join(__dirname, "version.txt");
@@ -21,6 +26,8 @@ let pageReady = false;
 const pendingMessages = [];
 let steamClient = null;
 let steamAvailable = false;
+let escapeInjectionFull = false;
+const pendingEscapeFrameIds = new Set();
 const storeFilePath = () => path.join(app.getPath("userData"), "store.json");
 
 function readVersionString() {
@@ -31,7 +38,7 @@ function readVersionString() {
     return "V_CHRISTMAS2025_V2";
   }
 }
-
+ 
 // Help Steam overlay injection on Windows.
 app.commandLine.appendSwitch(
   "disable-features",
@@ -54,6 +61,8 @@ function createWindow() {
   });
 
   mainWindow = win;
+  escapeInjectionFull = false;
+  pendingEscapeFrameIds.clear();
   win.setMenuBarVisibility(false);
   const version = readVersionString();
   win.loadFile(WRAPPER_FILE, { query: { version, domain: BASE_DOMAIN } });
@@ -95,7 +104,7 @@ function createWindow() {
     pageReady = true;
     flushPendingMessages();
     await sendSteamState();
-    injectEscapeBlocker(win.webContents);
+    scheduleEscapeInjection(win.webContents);
   });
 
   win.webContents.on("did-frame-finish-load", (_event, isMainFrame, frameId) => {
@@ -105,11 +114,15 @@ function createWindow() {
         (f) => f.frameId === frameId
       );
       if (frame) {
-        injectEscapeBlocker(win.webContents, frame);
+        scheduleEscapeInjection(win.webContents, frame);
       }
     } catch (_) {
       // Ignore frame injection errors.
     }
+  });
+
+  win.webContents.on("did-stop-loading", () => {
+    flushEscapeInjection(win.webContents);
   });
 }
 
@@ -122,22 +135,14 @@ function sendToGame(data) {
     return;
   }
 
-  const payload = JSON.stringify(data);
-  const script = `
-    (function() {
-      const payload = ${payload};
-      const targetOrigin = ${JSON.stringify(GAME_ORIGIN)};
-      const frame = document.getElementById("mainframe");
-      if (frame && frame.contentWindow) {
-        frame.contentWindow.postMessage(payload, targetOrigin);
-      } else {
-        window.postMessage(payload, targetOrigin);
-      }
-    })();
-  `;
-  mainWindow.webContents.executeJavaScript(script, true).catch((err) => {
+  try {
+    mainWindow.webContents.send("web2view-send", {
+      payload: data,
+      targetOrigin: GAME_ORIGIN,
+    });
+  } catch (err) {
     console.warn("[web2view] Failed to postMessage:", err);
-  });
+  }
 }
 
 function injectEscapeBlocker(webContents, frame = null) {
@@ -183,6 +188,49 @@ function injectEscapeBlocker(webContents, frame = null) {
   }
 }
 
+function scheduleEscapeInjection(webContents, frame = null) {
+  if (!webContents || webContents.isDestroyed()) return;
+
+  if (!webContents.isLoading()) {
+    injectEscapeBlocker(webContents, frame);
+    return;
+  }
+
+  if (frame) {
+    pendingEscapeFrameIds.add(frame.frameId);
+  } else {
+    escapeInjectionFull = true;
+  }
+}
+
+function flushEscapeInjection(webContents) {
+  if (!webContents || webContents.isDestroyed()) {
+    escapeInjectionFull = false;
+    pendingEscapeFrameIds.clear();
+    return;
+  }
+
+  if (escapeInjectionFull) {
+    escapeInjectionFull = false;
+    pendingEscapeFrameIds.clear();
+    injectEscapeBlocker(webContents);
+    return;
+  }
+
+  if (pendingEscapeFrameIds.size) {
+    const framesById = new Map(
+      webContents.mainFrame.frames.map((child) => [child.frameId, child])
+    );
+    for (const frameId of pendingEscapeFrameIds) {
+      const child = framesById.get(frameId);
+      if (child) {
+        injectEscapeBlocker(webContents, child);
+      }
+    }
+    pendingEscapeFrameIds.clear();
+  }
+}
+
 function flushPendingMessages() {
   while (pendingMessages.length) {
     sendToGame(pendingMessages.shift());
@@ -217,6 +265,9 @@ function initSteam() {
     const steamworks = require("steamworks.js");
     steamClient = steamworks.init(STEAM_APP_ID);
     steamAvailable = !!steamClient;
+    if (steamAvailable) {
+      runSteamAchievementSmokeTest();
+    }
   } catch (err) {
     steamAvailable = false;
     steamClient = null;
@@ -292,18 +343,66 @@ async function sendSteamState() {
 }
 
 function handleAchievement(name) {
-  if (!steamAvailable || !steamClient || !name) return;
+  if (!steamAvailable || !steamClient || !name) return false;
+  const achievementName = String(name);
   try {
+    if (steamClient.achievement?.activate) {
+      const ok = steamClient.achievement.activate(achievementName);
+      if (!ok) {
+        console.warn("[web2view] Achievement not activated:", achievementName);
+      } else {
+        steamClient.stats?.store?.();
+      }
+      return ok;
+    }
     if (steamClient.userStats?.setAchievement) {
-      steamClient.userStats.setAchievement(name);
+      steamClient.userStats.setAchievement(achievementName);
       steamClient.userStats.storeStats?.();
-    } else if (steamClient.achievements?.unlock) {
-      steamClient.achievements.unlock(name);
+      return true;
+    }
+    if (steamClient.achievements?.unlock) {
+      steamClient.achievements.unlock(achievementName);
+      return true;
     }
   } catch (err) {
     console.warn("[web2view] Achievement error:", err?.message || err);
   }
+  return false;
 }
+
+function runSteamAchievementSmokeTest() {
+  if (!steamAvailable || !steamClient) return;
+
+  if (resetAchievements) {
+    try {
+      if (steamClient.stats?.resetAll) {
+        const ok = steamClient.stats.resetAll(true);
+        if (!ok) {
+          console.warn("[web2view] Steam stats reset failed.");
+        } else {
+          steamClient.stats?.store?.();
+        }
+      } else {
+        console.warn("[web2view] Steam stats reset not supported.");
+      }
+    } catch (err) {
+      console.warn("[web2view] Steam stats reset error:", err?.message || err);
+    }
+  }
+
+  if (triggerTestAchievementOnLaunch && testAchievementName) {
+    attemptAchievementUnlock(testAchievementName, 6);
+  }
+}
+
+function attemptAchievementUnlock(name, attemptsLeft) {
+  const ok = handleAchievement(name);
+  if (ok || attemptsLeft <= 1) return;
+  setTimeout(() => {
+    attemptAchievementUnlock(name, attemptsLeft - 1);
+  }, 500);
+}
+
 
 function handleIncomingMessage(data) {
   if (!data || typeof data !== "object") return;
