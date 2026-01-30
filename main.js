@@ -9,7 +9,7 @@ const {
   shell,
 } = require("electron");
 
-const isDev = false;
+const isDev = !app.isPackaged;
 
 
 
@@ -138,6 +138,14 @@ function createWindow() {
       win.setFullScreen(true);
     }
   });
+
+  win.on("enter-full-screen", () => {
+    sendToGame({ key: "fullscreen", value: true });
+  });
+
+  win.on("leave-full-screen", () => {
+    sendToGame({ key: "fullscreen", value: false });
+  });
 }
 
 function sendToGame(data) {
@@ -200,6 +208,23 @@ function injectEscapeBlocker(webContents, frame = null) {
           });
         } catch (_) {}
       }
+      function patchSceneIsLoaded() {
+        try {
+          const fn = window.phaser_scene_postloader_anims;
+          if (!fn || fn.__blektrePatched) return;
+          let src = String(fn);
+          if (src.indexOf("window.parent.layout") === -1 &&
+              src.indexOf("window.parent.document") === -1) {
+            fn.__blektrePatched = true;
+            return;
+          }
+          src = src.split("window.parent.layout").join("layout");
+          src = src.split("window.parent.document").join("document");
+          const patched = eval("(" + src + ")");
+          patched.__blektrePatched = true;
+          window.phaser_scene_postloader_anims = patched;
+        } catch (_) {}
+      }
       const enterFullscreen = function() {
         sendFullscreen(true);
         return Promise.resolve();
@@ -216,6 +241,14 @@ function injectEscapeBlocker(webContents, frame = null) {
       overrideDocument("webkitExitFullscreen", exitFullscreen);
       overrideDocument("mozCancelFullScreen", exitFullscreen);
       overrideDocument("msExitFullscreen", exitFullscreen);
+      patchSceneIsLoaded();
+      const scenePatchInterval = setInterval(function() {
+        patchSceneIsLoaded();
+        if (window.phaser_scene_postloader_anims &&
+            window.phaser_scene_postloader_anims.__blektrePatched) {
+          clearInterval(scenePatchInterval);
+        }
+      }, 500);
       window.addEventListener(
         "keydown",
         function(event) {
@@ -558,14 +591,20 @@ function handleIncomingMessage(data) {
 
   if (normalized === "fullscreen") {
     if (!mainWindow || mainWindow.isDestroyed()) return;
+    const action = data.action || data.mode;
     const state =
       data.state ??
       data.value ??
       data.enabled ??
       data.on ??
       data.fullscreen ??
-      true;
-    mainWindow.setFullScreen(!!state);
+      null;
+    if (action === "toggle" || state === "toggle") {
+      mainWindow.setFullScreen(!mainWindow.isFullScreen());
+    } else {
+      const nextState = state === null ? true : !!state;
+      mainWindow.setFullScreen(nextState);
+    }
   }
 }
 
