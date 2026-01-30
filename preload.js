@@ -12,6 +12,49 @@ contextBridge.exposeInMainWorld("web2view", {
   },
 });
 
+contextBridge.exposeInMainWorld("electronAPI", {
+  fullscreen(state) {
+    ipcRenderer.send("web2view-fullscreen", !!state);
+  },
+});
+
+function installFullscreenGuards() {
+  const enterFullscreen = () => {
+    ipcRenderer.send("web2view-fullscreen", true);
+    return Promise.resolve();
+  };
+  const exitFullscreen = () => {
+    ipcRenderer.send("web2view-fullscreen", false);
+    return Promise.resolve();
+  };
+  const overrideElement = (name, fn) => {
+    try {
+      Object.defineProperty(Element.prototype, name, {
+        configurable: true,
+        value: fn,
+      });
+    } catch (_) {}
+  };
+  const overrideDocument = (name, fn) => {
+    try {
+      Object.defineProperty(Document.prototype, name, {
+        configurable: true,
+        value: fn,
+      });
+    } catch (_) {}
+  };
+  overrideElement("requestFullscreen", enterFullscreen);
+  overrideElement("webkitRequestFullscreen", enterFullscreen);
+  overrideElement("mozRequestFullScreen", enterFullscreen);
+  overrideElement("msRequestFullscreen", enterFullscreen);
+  overrideDocument("exitFullscreen", exitFullscreen);
+  overrideDocument("webkitExitFullscreen", exitFullscreen);
+  overrideDocument("mozCancelFullScreen", exitFullscreen);
+  overrideDocument("msExitFullscreen", exitFullscreen);
+}
+
+installFullscreenGuards();
+
 ipcRenderer.on("web2view-send", (_event, message) => {
   if (!message || typeof message !== "object") return;
   const targetOrigin =

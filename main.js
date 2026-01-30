@@ -10,6 +10,9 @@ const {
 } = require("electron");
 
 const isDev = false;
+
+
+
 const resetAchievements = false;
 const triggerTestAchievementOnLaunch = true;
 const testAchievementName = "RUNTHEGAME";
@@ -33,9 +36,9 @@ const storeFilePath = () => path.join(app.getPath("userData"), "store.json");
 function readVersionString() {
   try {
     const raw = fs.readFileSync(VERSION_FILE, "utf8").trim();
-    return raw || "V_CHRISTMAS2025_V2";
+    return raw || "V_BLEKTREWRAPPER_V02";
   } catch (_) {
-    return "V_CHRISTMAS2025_V2";
+    return "V_BLEKTREWRAPPER_V02";
   }
 }
  
@@ -91,9 +94,13 @@ function createWindow() {
     if (input.type !== "keyDown") return;
     const isF12 = input.key === "F12";
     const isCtrlShiftI = input.control && input.shift && input.key === "I";
+    const isF11 = input.key === "F11";
     if (isF12 || isCtrlShiftI) {
       event.preventDefault();
       win.webContents.toggleDevTools();
+    }
+    if (isF11) {
+      event.preventDefault();
     }
     if (input.key === "Escape" && win.isFullScreen()) {
       event.preventDefault();
@@ -124,6 +131,13 @@ function createWindow() {
   win.webContents.on("did-stop-loading", () => {
     flushEscapeInjection(win.webContents);
   });
+
+  win.webContents.on("enter-html-full-screen", () => {
+    exitDomFullscreen(win.webContents);
+    if (!win.isFullScreen()) {
+      win.setFullScreen(true);
+    }
+  });
 }
 
 function sendToGame(data) {
@@ -150,6 +164,58 @@ function injectEscapeBlocker(webContents, frame = null) {
     (function() {
       if (window.__blektreEscBlockerInstalled) return;
       window.__blektreEscBlockerInstalled = true;
+      function sendFullscreen(state) {
+        try {
+          if (window.electronAPI && typeof window.electronAPI.fullscreen === "function") {
+            window.electronAPI.fullscreen(!!state);
+            return;
+          }
+          if (window.web2view && typeof window.web2view.send === "function") {
+            window.web2view.send({ type: "fullscreen", state: !!state });
+            return;
+          }
+        } catch (_) {}
+        try {
+          const message = { type: "fullscreen", state: !!state };
+          if (window.top && window.top !== window) {
+            window.top.postMessage(message, "*");
+          } else {
+            window.postMessage(message, "*");
+          }
+        } catch (_) {}
+      }
+      function overrideElement(name, fn) {
+        try {
+          Object.defineProperty(Element.prototype, name, {
+            configurable: true,
+            value: fn,
+          });
+        } catch (_) {}
+      }
+      function overrideDocument(name, fn) {
+        try {
+          Object.defineProperty(Document.prototype, name, {
+            configurable: true,
+            value: fn,
+          });
+        } catch (_) {}
+      }
+      const enterFullscreen = function() {
+        sendFullscreen(true);
+        return Promise.resolve();
+      };
+      const exitFullscreen = function() {
+        sendFullscreen(false);
+        return Promise.resolve();
+      };
+      overrideElement("requestFullscreen", enterFullscreen);
+      overrideElement("webkitRequestFullscreen", enterFullscreen);
+      overrideElement("mozRequestFullScreen", enterFullscreen);
+      overrideElement("msRequestFullscreen", enterFullscreen);
+      overrideDocument("exitFullscreen", exitFullscreen);
+      overrideDocument("webkitExitFullscreen", exitFullscreen);
+      overrideDocument("mozCancelFullScreen", exitFullscreen);
+      overrideDocument("msExitFullscreen", exitFullscreen);
       window.addEventListener(
         "keydown",
         function(event) {
@@ -186,6 +252,19 @@ function injectEscapeBlocker(webContents, frame = null) {
   } catch (_) {
     // Ignore injection errors.
   }
+}
+
+function exitDomFullscreen(webContents) {
+  if (!webContents || webContents.isDestroyed()) return;
+  const script = "document.exitFullscreen && document.exitFullscreen();";
+  try {
+    webContents.executeJavaScript(script, true).catch(() => {});
+  } catch (_) {}
+  try {
+    for (const child of webContents.mainFrame.frames) {
+      child.executeJavaScript(script, true).catch(() => {});
+    }
+  } catch (_) {}
 }
 
 function scheduleEscapeInjection(webContents, frame = null) {
@@ -476,6 +555,18 @@ function handleIncomingMessage(data) {
   ) {
     app.quit();
   }
+
+  if (normalized === "fullscreen") {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const state =
+      data.state ??
+      data.value ??
+      data.enabled ??
+      data.on ??
+      data.fullscreen ??
+      true;
+    mainWindow.setFullScreen(!!state);
+  }
 }
 
 app.whenReady().then(() => {
@@ -483,6 +574,10 @@ app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
   ipcMain.on("web2view-message", (_event, data) => {
     handleIncomingMessage(data);
+  });
+  ipcMain.on("web2view-fullscreen", (_event, state) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.setFullScreen(!!state);
   });
   globalShortcut.register("F12", () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
